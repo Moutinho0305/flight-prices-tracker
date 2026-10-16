@@ -1,5 +1,7 @@
 # Flight Prices Tracker
 
+[![Testes](https://github.com/Moutinho0305/flight-prices-tracker/actions/workflows/tests.yml/badge.svg)](https://github.com/Moutinho0305/flight-prices-tracker/actions/workflows/tests.yml)
+
 Vigia preços de voos da Ryanair e avisa no telemóvel (via [ntfy](https://ntfy.sh)) quando mudam. Só precisa de Python 3.
 
 ## Como pôr a funcionar
