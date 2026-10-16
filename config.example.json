@@ -1,0 +1,10 @@
+{
+  "ntfy_topic": "mete-aqui-um-nome-secreto-e-unico",
+  "currency": "EUR",
+  "interval_minutes": 60,
+  "min_change": 1.0,
+  "routes": [
+    { "origin": "OPO", "destination": "STN", "target_price": 30 },
+    { "origin": "OPO", "destination": "BCN", "round_trip": true, "stay_min_days": 2, "stay_max_days": 4, "weekdays": ["fri"] }
+  ]
+}
