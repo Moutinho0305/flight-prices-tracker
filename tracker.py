@@ -1,12 +1,15 @@
 """Ryanair price tracker: vigia o voo mais barato por dia e avisa via ntfy quando o preço muda.
 
 Uso:
+    python tracker.py --setup    # assistente: cria o config.json e envia uma notificação de teste
     python tracker.py            # corre em loop, de X em X minutos (interval_minutes)
     python tracker.py --once     # uma verificação só (para o Agendador de Tarefas)
     python tracker.py --test     # envia uma notificação de teste
 """
 import csv
 import json
+import re
+import secrets
 import sys
 import time
 import urllib.parse
@@ -28,13 +31,115 @@ API = "https://www.ryanair.com/api/farfnd/v4/"  # + oneWayFares | roundTripFares
 HEADERS = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
 
 
+def validate_config(cfg):
+    """Levanta ValueError com uma mensagem clara se o config estiver errado."""
+    if str(cfg.get("ntfy_topic", "")).strip() in ("", "mete-aqui-um-nome-secreto-e-unico"):
+        raise ValueError("Falta o ntfy_topic (o tópico que subscreveste na app ntfy).")
+    routes = cfg.get("routes") or ([cfg] if cfg.get("origin") and cfg.get("destination") else [])
+    if not routes:
+        raise ValueError("Falta pelo menos uma rota em 'routes' (origin e destination).")
+    for r in routes:
+        for k in ("origin", "destination"):
+            if not re.fullmatch(r"[A-Za-z]{3}", str(r.get(k, ""))):
+                raise ValueError(f"'{k}' tem de ser um código IATA de 3 letras (ex. OPO), recebi: {r.get(k)!r}")
+    for r in [{**cfg, **x} for x in routes]:
+        for k in ("date_from", "date_to"):
+            if r.get(k):
+                try:
+                    date.fromisoformat(r[k])
+                except ValueError:
+                    raise ValueError(f"'{k}' tem de ter o formato AAAA-MM-DD, recebi: {r[k]!r}")
+        for w in r.get("weekdays", []):
+            if str(w).lower()[:3] not in WEEKDAYS:
+                raise ValueError(f"Dia da semana inválido {w!r}. Usa: {', '.join(WEEKDAYS)}")
+        if r.get("stay_min_days", 2) > r.get("stay_max_days", 7):
+            raise ValueError("stay_min_days não pode ser maior que stay_max_days.")
+
+
 def load_config():
     if not CONFIG_FILE.exists():
-        sys.exit("Falta o config.json. Copia config.example.json para config.json e preenche (ver README).")
-    cfg = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-    if cfg.get("ntfy_topic", "").startswith("mete-aqui"):
-        sys.exit("Define o teu ntfy_topic em config.json (ver README).")
+        sys.exit("Ainda não tens config.json. Corre:  python tracker.py --setup")
+    try:
+        cfg = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        validate_config(cfg)
+    except (ValueError, json.JSONDecodeError) as e:
+        sys.exit(f"Erro no config.json: {e}\nPodes refazê-lo com:  python tracker.py --setup")
     return cfg
+
+
+def ask(prompt, default="", check=lambda v: v):
+    """Pergunta no terminal até a resposta ser válida. Enter aceita o valor por defeito."""
+    while True:
+        answer = input(f"{prompt}{f' [{default}]' if default else ''}: ").strip() or default
+        try:
+            return check(answer)
+        except ValueError as e:
+            print(f"  {e}")
+
+
+def _nonempty(v):
+    if not v:
+        raise ValueError("Não pode ficar vazio.")
+    return v
+
+
+def _int(v):
+    try:
+        return int(v)
+    except ValueError:
+        raise ValueError("Escreve um número inteiro.")
+
+
+def _iata(v):
+    if not re.fullmatch(r"[A-Za-z]{3}", v):
+        raise ValueError("Código de 3 letras, ex. OPO (Porto), LIS (Lisboa), STN (Londres Stansted).")
+    return v.upper()
+
+
+def _yes_no(v):
+    if v.lower() not in ("s", "n", "sim", "nao", "não", "y", "yes", "no"):
+        raise ValueError("Responde s ou n.")
+    return v.lower() in ("s", "sim", "y", "yes")
+
+
+def _optional_number(v):
+    if not v:
+        return None
+    try:
+        return float(v.replace(",", "."))
+    except ValueError:
+        raise ValueError("Escreve um número (ou Enter para saltar).")
+
+
+def setup():
+    """Assistente interativo: cria o config.json e envia uma notificação de teste."""
+    if CONFIG_FILE.exists() and not ask("Já existe um config.json. Substituir? (s/n)", "n", _yes_no):
+        return
+    print("\n== Configuração do tracker ==\n")
+    topic = ask("Nome do tópico ntfy (secreto e único)", f"voos-{secrets.token_hex(4)}", _nonempty)
+    print(f"\nNo telemóvel: instala a app ntfy e subscreve o tópico  {topic}")
+    input("Quando tiveres feito, carrega Enter... ")
+    route = {
+        "origin": ask("Aeroporto de origem (código IATA, ex. OPO)", check=_iata),
+        "destination": ask("Aeroporto de destino (código IATA, ex. STN)", check=_iata),
+    }
+    if ask("Ida e volta? (s/n)", "n", _yes_no):
+        route["round_trip"] = True
+        route["stay_min_days"] = ask("Estadia mínima (dias)", "2", _int)
+        route["stay_max_days"] = ask("Estadia máxima (dias)", "7", _int)
+    target = ask("Avisar só abaixo de que preço? (Enter = qualquer alteração)", check=_optional_number)
+    if target is not None:
+        route["target_price"] = target
+    cfg = {"ntfy_topic": topic, "currency": "EUR", "interval_minutes": 60, "min_change": 1.0, "routes": [route]}
+    validate_config(cfg)
+    CONFIG_FILE.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    print("\nconfig.json criado. A enviar notificação de teste...")
+    try:
+        notify(cfg, "Teste", "O tracker de voos está a funcionar.")
+        print("Enviada! Se chegou ao telemóvel, está tudo pronto.")
+    except Exception as e:
+        print(f"Não consegui enviar ({e}). Verifica a internet e o tópico.")
+    print("\nPara começar a vigiar:  python tracker.py")
 
 
 def routes_from(cfg):
@@ -191,6 +296,9 @@ def check(cfg, r, state):
 
 
 def main():
+    if "--setup" in sys.argv:
+        setup()
+        return
     cfg = load_config()
     if "--test" in sys.argv:
         notify(cfg, "Teste", "O tracker de voos está a funcionar.")
